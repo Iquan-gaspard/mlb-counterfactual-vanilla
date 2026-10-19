@@ -189,6 +189,22 @@ if os.path.exists(csv_path):
     except Exception as e:
         print(f"⚠️ 載入備用 CSV 失敗：{e}")
 
+# ==============================================================================
+# 🩺 外部 Cron / 監控專用健康檢查端點 (公開、無金鑰、極速回傳 200 OK)
+# ==============================================================================
+@app.route('/health', methods=['GET'])
+@limiter.exempt  # 🌟 豁免限流，避免每 10 分鐘的 ping 被限流器阻擋
+def health_check():
+    """
+    專供外部排程 (如 cron-job.org / UptimeRobot) 保溫與存活檢查。
+    不執行任何資料庫查詢或 PyTorch 矩陣推論，耗時 < 1ms。
+    """
+    return jsonify({
+        "status": "healthy",
+        "service": "baseball-inference-engine",
+        "timestamp": pd.Timestamp.now().isoformat()
+    }), 200
+
 # ==========================================
 # API 路由區塊 (全數掛上金鑰防護)
 # ==========================================
