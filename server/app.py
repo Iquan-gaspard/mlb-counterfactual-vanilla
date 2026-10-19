@@ -343,7 +343,7 @@ def simulate_counterfactual():
         "orig_probs": [round(p * 100, 1) for p in probs_orig]
     })
 
-# 模式 2 & 3：序列推演 (Sequence Simulation)
+# 模式 2 & 3：序列推演 (極速優化版：只對目標球執行 Transformer 前向傳播)
 @app.route('/api/simulate_sequence', methods=['POST'])
 @limiter.limit("30 per minute")
 @require_api_key
@@ -377,12 +377,13 @@ def simulate_sequence():
         p_zone = p_info['zone']
         is_target_pitch = (i == len(pitches) - 1)
         
-        # 優先直接吃 BFF 傳入的真實分區數值
+        # 讀取物理特性與座標
         speed = float(p_info.get('speed', 0.95))
         pfx_x = float(p_info.get('pfx_x', 0.0))
         pfx_z = float(p_info.get('pfx_z', 0.0))
         px, pz = ALL_ZONES.get(p_zone, (0.0, 0.0))
         
+        # 計算位移差分 Delta
         if i == 0:
             d_s, d_px, d_pz, d_pfx, d_pfz = 0.0, 0.0, 0.0, 0.0, 0.0
         else:
@@ -393,7 +394,7 @@ def simulate_sequence():
             d_pfx = pfx_x - prev['pfx_x']
             d_pfz = pfx_z - prev['pfx_z']
             
-        # 歷史球反應填寫
+        # 歷史球反應 OHE
         res_str = str(p_info.get('result', '')).strip()
         if not is_target_pitch and res_str:
             outcome_vec = [
@@ -411,33 +412,43 @@ def simulate_sequence():
         ]
         history_features.append({'speed': speed, 'px': px, 'pz': pz, 'pfx_x': pfx_x, 'pfx_z': pfx_z, 'vec': pitch_vec})
         
-        current_seq = [f['vec'] for f in history_features[-6:]]
-        padded_seq = [[0.0]*13] * (6 - len(current_seq)) + current_seq
-        
-        pitch_b = target_b if is_target_pitch and ('b_count' in data or 's_count' in data) else current_b
-        pitch_s = target_s if is_target_pitch and ('b_count' in data or 's_count' in data) else current_s
+        # ==============================================================================
+        # 🌟 核心提速關鍵：只有最後一顆目標球，才執行神經網路推論！
+        # ==============================================================================
+        if is_target_pitch:
+            current_seq = [f['vec'] for f in history_features[-6:]]
+            padded_seq = [[0.0]*13] * (6 - len(current_seq)) + current_seq
             
-        ctx = build_20d_context(adv_stats, pitcher_arm_angle=arm_angle, b_count=pitch_b, s_count=pitch_s)
-        
-        t_seq = torch.tensor(np.array([padded_seq]), dtype=torch.float32).to(device)
-        t_ctx = torch.tensor(np.array([ctx]), dtype=torch.float32).to(device)
-        
-        with torch.no_grad():
-            probs = F.softmax(model(t_seq, t_ctx), dim=1).cpu().numpy().flatten().tolist()
+            pitch_b = target_b if ('b_count' in data or 's_count' in data) else current_b
+            pitch_s = target_s if ('b_count' in data or 's_count' in data) else current_s
+                
+            ctx = build_20d_context(adv_stats, pitcher_arm_angle=arm_angle, b_count=pitch_b, s_count=pitch_s)
             
-        results.append({
-            "pitch_num": i + 1,
-            "type": p_type,
-            "zone": p_zone,
-            "probs": {
+            t_seq = torch.tensor(np.array([padded_seq]), dtype=torch.float32).to(device)
+            t_ctx = torch.tensor(np.array([ctx]), dtype=torch.float32).to(device)
+            
+            with torch.no_grad():
+                probs = F.softmax(model(t_seq, t_ctx), dim=1).cpu().numpy().flatten().tolist()
+                
+            probs_dict = {
                 "take": round(probs[0]*100, 1),
                 "whiff": round(probs[1]*100, 1),
                 "foul": round(probs[2]*100, 1),
                 "weak_contact": round(probs[3]*100, 1),
                 "hard_contact": round(probs[4]*100, 1)
             }
+        else:
+            # 歷史球不耗費 CPU 算力，給予輕量佔位資料即可
+            probs_dict = {"take": 0, "whiff": 0, "foul": 0, "weak_contact": 0, "hard_contact": 0}
+
+        results.append({
+            "pitch_num": i + 1,
+            "type": p_type,
+            "zone": p_zone,
+            "probs": probs_dict
         })
 
+        # 球數推進邏輯 (維持不變)
         if res_str == 'Take':
             if p_zone in STRIKE_ZONES: current_s = min(current_s + 1, 2)
             else: current_b = min(current_b + 1, 3)
