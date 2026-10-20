@@ -51,8 +51,26 @@ limiter = Limiter(
     default_limits_exempt_when=lambda: request.method == 'OPTIONS'
 )
 
-# 🛡️ 3. 內部服務通行金鑰驗證
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "dev-secret-key-change-in-prod")
+# ==============================================================================
+# 🛡️ 內部服務通行金鑰驗證 (落實 Fail-Closed 安全失敗原則)
+# ==============================================================================
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+
+if not INTERNAL_API_SECRET:
+    # 🌟 判斷是否為本地環境 (非 Render 雲端環境)
+    is_cloud_prod = os.getenv("RENDER") == "true" or os.getenv("FLASK_ENV") == "production"
+    
+    if is_cloud_prod:
+        # 生產環境嚴格鎖死
+        raise RuntimeError(
+            "🚨 [FATAL SECURITY ERROR] 缺少環境變數 INTERNAL_API_SECRET！"
+            "基於零信任安全原則，生產環境嚴禁使用預設密鑰，伺服器終止啟動。"
+        )
+    else:
+        # 本地本地開發自動給予預設值，避免中斷除錯
+        INTERNAL_API_SECRET = "my-super-secret-baseball-key-2026"
+        print("⚠️ [安全提示] 未偵測到 INTERNAL_API_SECRET，目前處於本機開發模式，使用本地測試密鑰！")
+        
 
 def require_api_key(f):
     @wraps(f)
